@@ -1,0 +1,10 @@
+{
+  "active_account_id": "YOUR_ACCOUNT_ID",
+  "accounts": [
+    {
+      "account_id": "YOUR_ACCOUNT_ID",
+      "account_mode": "实盘账户",
+      "qmt_root": "C:\\QMT"
+    }
+  ]
+}

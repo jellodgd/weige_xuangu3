@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+
+logs/
+logs_*/
+
+.venv/
+venv/
+env/
+
+qmt_accounts_config.json
+apikey.txt

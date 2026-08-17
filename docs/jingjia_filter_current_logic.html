@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MiniQMT 竞价筛选与下单策略说明</title>
+  <style>
+    :root {
+      --text: #1f2937;
+      --muted: #64748b;
+      --line: #dbe3ee;
+      --panel: #f8fafc;
+      --blue: #1d4ed8;
+      --blue-soft: #eff6ff;
+      --green: #047857;
+      --green-soft: #ecfdf5;
+      --red: #b91c1c;
+      --red-soft: #fef2f2;
+      --amber: #92400e;
+      --amber-soft: #fffbeb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      max-width: 1120px;
+      margin: 0 auto;
+      padding: 36px 24px 72px;
+      color: var(--text);
+      background: #fff;
+      font: 16px/1.72 -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Microsoft YaHei", "PingFang SC", sans-serif;
+    }
+    h1, h2, h3 { color: #0f172a; line-height: 1.35; }
+    h1 {
+      margin: 0 0 8px;
+      padding-bottom: 16px;
+      border-bottom: 1px solid var(--line);
+      font-size: 30px;
+    }
+    h2 {
+      margin-top: 38px;
+      padding-bottom: 8px;
+      border-bottom: 1px solid var(--line);
+      font-size: 23px;
+    }
+    h3 { margin-top: 24px; font-size: 18px; }
+    p { margin: 10px 0; }
+    a { color: var(--blue); }
+    code {
+      padding: 2px 5px;
+      border-radius: 4px;
+      background: #eef2f7;
+      font-family: Consolas, "Courier New", monospace;
+    }
+    pre {
+      overflow-x: auto;
+      padding: 14px 16px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #f8fafc;
+      line-height: 1.55;
+    }
+    pre code { padding: 0; background: transparent; }
+    table {
+      width: 100%;
+      margin: 14px 0 20px;
+      border-collapse: collapse;
+      font-size: 15px;
+    }
+    th, td {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f1f5f9; color: #0f172a; }
+    li { margin: 5px 0; }
+    .meta { color: var(--muted); }
+    .notice, .warning, .success, .soft-warning {
+      margin: 18px 0;
+      padding: 14px 18px;
+      border-left: 4px solid;
+      border-radius: 5px;
+    }
+    .notice { border-color: var(--blue); background: var(--blue-soft); }
+    .warning { border-color: var(--red); background: var(--red-soft); }
+    .success { border-color: var(--green); background: var(--green-soft); }
+    .soft-warning { border-color: var(--amber); background: var(--amber-soft); }
+    .flow {
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      margin: 18px 0;
+    }
+    .flow div {
+      padding: 13px 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel);
+      text-align: center;
+    }
+    .formula {
+      margin: 10px 0;
+      padding: 11px 14px;
+      border-left: 4px solid var(--blue);
+      background: var(--blue-soft);
+      font-family: Consolas, "Microsoft YaHei", monospace;
+    }
+    .small { color: var(--muted); font-size: 14px; }
+    @media (max-width: 760px) {
+      body { padding: 22px 14px 50px; }
+      .flow { grid-template-columns: 1fr 1fr; }
+      table { font-size: 14px; }
+      th, td { padding: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <h1>MiniQMT 竞价筛选与下单策略说明</h1>
+  <p class="meta">
+    更新时间：2026-07-14　对应程序：<code>jingjia_filter.py</code>　
+    配置界面：<code>jingjia_filter_qt.py</code>
+  </p>
+
+  <div class="warning">
+    <strong>实盘提醒：</strong>实时模式会连接配置文件指定的股票账户，并在
+    <strong>09:27:00</strong> 对交易候选股票真实提交限价买单。历史模式只筛选，不下单。
+  </div>
+
+  <h2>一、整体流程</h2>
+
+  <div class="flow">
+    <div>1. 读取账户与 QMT 配置</div>
+    <div>2. 09:15:05 准备昨收与日线基准</div>
+    <div>3. 09:16 前置涨停检查</div>
+    <div>4. 采集 a～f 六个价格</div>
+    <div>5. 执行基础六项筛选条件，按需叠加前两日跌幅过滤</div>
+    <div>6. 保存全部合格股票</div>
+    <div>7. 按 f 相对 T-3 收盘价涨跌幅取前 N 只</div>
+    <div>8. 09:27 提交买单</div>
+  </div>
+
+  <div class="success">
+    <strong>核心原则：</strong>满足筛选条件的股票全部保存；但只有
+    <strong><code>f 相对 T-3交易日收盘价的涨跌幅</code> 最小的前 N 只</strong>进入下单流程，
+    其余合格股票只记录、不交易。
+  </div>
+
+  <h2>二、配置文件与启动方式</h2>
+
+  <p>当前默认配置文件为项目根目录：</p>
+  <pre><code>.\qmt_accounts_config.json</code></pre>
+
+  <p>主程序默认也读取这个文件，因此直接启动即可：</p>
+  <pre><code>python .\jingjia_filter.py</code></pre>
+
+  <p>如果希望用界面选择账号和 MiniQMT 路径，可以启动：</p>
+  <pre><code>run_jingjia_filter_qt.bat</code></pre>
+
+  <p>Qt 界面支持：</p>
+  <ul>
+    <li>读取 <code>qmt_accounts_config.json</code> 里的账号列表；</li>
+    <li>查看配置中的账号，并在下载/检查数据时保存当前界面账号为配置文件当前账号；</li>
+    <li>查看或调整账号类型：<code>实盘账户</code> 或 <code>模拟账户</code>；</li>
+    <li>查看或选择 MiniQMT 根目录；</li>
+    <li>点击“下载近30天数据”时手动补齐 T-3 条件需要的日线缓存；</li>
+    <li>点击“检查最近三个交易日数据”时检查 T-3 条件依赖的数据是否准备好；</li>
+    <li>修改单只预算上限比例，默认 20%，可选 20% 至 100%；</li>
+    <li>勾选“前两日跌幅过滤”后，要求 T-2 和 T-1 当日最大跌幅都不低于所选阈值，默认不勾选，阈值默认 -9%；</li>
+    <li>点击“启动策略”时不会保存当前界面配置，会按配置文件中的当前账号启动，并在界面里显示策略输出。</li>
+  </ul>
+
+  <div class="soft-warning">
+    如果配置文件没有 <code>active_account_id</code>，程序会默认使用
+    <code>accounts</code> 列表里的第一个账号。使用前请确认当前账号和 QMT 路径是否符合预期。
+  </div>
+
+  <h2>三、股票池范围</h2>
+
+  <p>策略只处理默认实行 10% 涨跌幅限制的沪深主板普通 A 股。</p>
+
+  <table>
+    <thead>
+      <tr><th>市场</th><th>保留代码前缀</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>上海</td><td><code>600 / 601 / 603 / 605</code></td></tr>
+      <tr><td>深圳</td><td><code>000 / 001 / 002 / 003</code></td></tr>
+    </tbody>
+  </table>
+
+  <p>程序会排除：</p>
+  <ul>
+    <li>名称包含 <code>ST</code> 的股票；</li>
+    <li>名称以 <code>N</code> 或 <code>C</code> 开头的新股；</li>
+    <li>名称包含“退”的股票；</li>
+    <li>创业板、科创板、北交所等非主板股票；</li>
+    <li>无法取得有效昨收价、涨停价或排序基准价的股票。</li>
+  </ul>
+
+  <h2>四、precheck 与 a～f 采样定义</h2>
+
+  <p>
+    实时模式会先在 <strong>09:15:05</strong> 准备股票池、昨日收盘价、当天涨停价，
+    以及用于最终排序的 T-3 交易日收盘价、T-2/T-1 最大跌幅检查需要的日线最低价。Qt 启动器默认不在启动策略时下载日线，
+    而是读取手动准备好的本地/服务端缓存；如果勾选“等待运行时在9:00下载近30天数据”，
+    程序会在交易日 <strong>09:00:00</strong> 开始下载近 30 天日线。
+    Qt 启动器也提供“下载近30天数据”和“检查最近三个交易日数据”两个独立按钮，这两个按钮只处理行情缓存，不会连接交易账号或下单。之后按本地电脑时间触发采集，
+    但价格归属使用的是 QMT 行情返回字段 <code>quote["time"]</code> 转换得到的
+    <code>quote_time</code>，不是程序本机读取行情的 <code>scan_time</code>。
+  </p>
+
+  <table>
+    <thead>
+      <tr>
+        <th>变量</th>
+        <th>本地开始采集时间</th>
+        <th>接受 quote_time 下限</th>
+        <th>接受 quote_time 上限</th>
+        <th>说明</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><strong>precheck</strong></td><td>09:16:00</td><td>09:16:00</td><td>09:18:00</td><td>前置校验价格，不属于 a～f</td></tr>
+      <tr><td><strong>a</strong></td><td>09:20:03</td><td>09:20:00</td><td>09:20:20</td><td>接受 09:20:00 之后的第一条有效行情</td></tr>
+      <tr><td><strong>b</strong></td><td>09:21:00</td><td>09:20:55</td><td>09:21:20</td><td>允许目标分钟前 5 秒至目标后 20 秒</td></tr>
+      <tr><td><strong>c</strong></td><td>09:22:00</td><td>09:21:55</td><td>09:22:20</td><td>同 b 的窗口口径</td></tr>
+      <tr><td><strong>d</strong></td><td>09:23:00</td><td>09:22:55</td><td>09:23:20</td><td>同 b 的窗口口径</td></tr>
+      <tr><td><strong>e</strong></td><td>09:24:00</td><td>09:23:55</td><td>09:24:20</td><td>同 b 的窗口口径</td></tr>
+      <tr><td><strong>f</strong></td><td>09:25:05</td><td>09:25:00</td><td>09:26:59</td><td>用于最终涨幅筛选和排序计算</td></tr>
+    </tbody>
+  </table>
+
+  <h3>采集方式</h3>
+  <ul>
+    <li>普通点位默认最多等待 <strong>20 秒</strong>；</li>
+    <li>等待期间约每 <strong>0.2 秒</strong>重新查询一次；</li>
+    <li>如果触发时已有落在对应 <code>quote_time</code> 窗口内的快照，立即采用；</li>
+    <li>否则采用等待窗口内第一条符合 <code>quote_time</code> 要求的数据；</li>
+    <li>成功取得数据的股票会从本轮待查询列表移除，后续重试只请求剩余股票；</li>
+    <li>每只股票、每个目标时间最多保存一个价格。</li>
+  </ul>
+
+  <div class="notice">
+    <code>precheck</code> 和 <code>f</code> 是特殊点：
+    <code>precheck</code> 会从 <code>09:16:00</code> 持续采到 <code>09:18:00</code>；
+    <code>f</code> 从 <code>09:25:05</code> 开始采，持续到 <code>09:26:30</code>。
+    只要期间拿到 <code>09:25:00</code> 至 <code>09:26:59</code> 的
+    <code>quote_time</code>，就记录为 f。
+  </div>
+
+  <h3>quote_time 与 scan_time 的区别</h3>
+  <table>
+    <thead>
+      <tr><th>字段</th><th>含义</th><th>是否决定 a～f 归属</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>quote_time</code></td>
+        <td>QMT 返回行情里的时间，来自 <code>quote["time"]</code>。</td>
+        <td><strong>是</strong>。只有落在窗口里的 quote_time 才会被接受。</td>
+      </tr>
+      <tr>
+        <td><code>scan_time</code></td>
+        <td>本机程序实际调用接口并收到数据的时间。</td>
+        <td>否。只用于观察程序读取延迟。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>五、筛选条件</h2>
+
+  <p>股票必须同时满足以下六项基础条件。Qt 勾选“前两日跌幅过滤”时，还会叠加第 7 项可选条件。</p>
+
+  <h3>条件 1：09:16 precheck 价格是涨停价</h3>
+  <div class="formula">precheck = 当天涨停价</div>
+  <p class="small">比较时允许半个最小报价单位的浮点误差。</p>
+
+  <h3>条件 2：a 涨幅满足可配置条件</h3>
+  <div class="formula">a 涨幅 = (a / 昨收价 - 1) × 100%</div>
+  <div class="formula">默认：a 涨幅 &gt; 5%</div>
+  <p>
+    Qt 启动器里可以把该条件调整为 5%以上 到 9%以上，也可以选择 涨停。
+    选择百分比时使用严格大于，例如 5%以上 表示 a 涨幅 &gt; 5%，不是大于等于；
+    选择 涨停 时，要求 a 点价格等于当天涨停价，比较时同样允许半个最小报价单位的误差。
+  </p>
+
+  <h3>条件 3：a～f 六个价格单调不升</h3>
+  <div class="formula">a ≥ b ≥ c ≥ d ≥ e ≥ f</div>
+  <p class="small">相邻价格比较同样允许半个最小报价单位的误差。</p>
+
+  <h3>条件 4：f 涨幅在 -1% 至 +3%</h3>
+  <div class="formula">f 涨幅 = (f / 昨收价 - 1) × 100%</div>
+  <div class="formula">-1% ≤ f 涨幅 ≤ +3%</div>
+  <p>上下边界都包含。</p>
+
+  <h3>条件 5：f 相对 T-3 收盘价涨跌幅在 -10% 至 +10%</h3>
+  <div class="formula">T-3 基准涨跌幅 = (f / T-3交易日收盘价 - 1) × 100%</div>
+  <div class="formula">-10% ≤ T-3 基准涨跌幅 ≤ +10%</div>
+  <p>
+    上下边界都包含。缺少 T-3 交易日收盘价时，该股票不能通过最终筛选。
+  </p>
+
+  <h3>条件 6：最后阶段跌幅小于 e 到涨停价的距离</h3>
+  <div class="formula">(e - f) &lt; (当天涨停价 - e)</div>
+  <p>
+    这里比较的是绝对价格差，不是百分比。含义是：09:24 到 f 的下跌幅度，
+    必须小于 e 价格距离当天涨停价的空间。
+  </p>
+
+  <h3>可选条件 7：T-2/T-1 当日最大跌幅过滤</h3>
+  <p>Qt 启动器里的“前两日跌幅过滤”默认不勾选。不勾选时，不执行该条件；勾选后阈值可选择 -9%、-8%、-7%、-6%，默认 -9%。</p>
+  <div class="formula">T-2最大跌幅 = (T-2最低价 / T-3收盘价 - 1) × 100%</div>
+  <div class="formula">T-1最大跌幅 = (T-1最低价 / T-2收盘价 - 1) × 100%</div>
+  <div class="formula">T-2最大跌幅 ≥ 选择的阈值，且 T-1最大跌幅 ≥ 选择的阈值</div>
+  <p>缺少对应交易日最低价或前一日收盘价时，勾选该条件后该股票不能通过筛选。</p>
+
+  <h2>六、最终前五排序规则</h2>
+
+  <h3>1. 全部股票和最终入选股票分别保存</h3>
+  <p>全部股票及失败原因会写入 all CSV；最终按排序取出的前 N 只会写入：</p>
+  <pre><code>logs\jingjia_filter_selected_YYYYMMDD.csv
+logs\jingjia_filter_selected_YYYYMMDD.sel</code></pre>
+
+  <h3>2. 只有新排序指标前 N 名参与交易</h3>
+  <p>当前不再按 f 涨幅排序，而是按下面的价差升序排序：</p>
+  <div class="formula">排序基准 x = 当前交易日前第 3 个交易日的收盘价</div>
+  <div class="formula">排序值 = (f / x - 1) × 100%</div>
+  <div class="formula">按排序值从小到大取前 N 只</div>
+  <p>N 默认为 5，可在 Qt 启动器里的“最终下单股票数”修改。</p>
+
+  <table>
+    <thead>
+      <tr><th>当前交易日</th><th>x 的日期</th><th>计算方式</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>周一早上 09:25</td>
+        <td>上周三收盘价</td>
+        <td><code>f - 上周三收盘价</code></td>
+      </tr>
+      <tr>
+        <td>周四早上 09:25</td>
+        <td>本周一收盘价</td>
+        <td><code>f - 本周一收盘价</code></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <ol>
+    <li>先筛出满足基础条件和已启用可选条件的全部股票；</li>
+    <li>为每只股票读取当前交易日前第 3 个交易日的收盘价 <code>x</code>；</li>
+    <li>计算 <code>(f / x - 1) × 100%</code>；</li>
+    <li>按该涨跌幅从低到高排序；</li>
+    <li>排序值相同则按股票代码排序；</li>
+    <li>最多取前 N 只作为 09:27 下单对象，并写入 selected CSV / .sel；</li>
+    <li>其他合格股票只保留在 all CSV 中，不进入 selected 文件，也不提交订单。</li>
+  </ol>
+
+  <div class="soft-warning">
+    注意：筛选条件中的 <code>f 涨幅在 -1% 至 +3%</code> 仍然使用“昨日收盘价”计算。
+    新增的 <code>T-3 基准涨跌幅</code> 使用 <code>f / T-3交易日收盘价 - 1</code> 计算；
+    最终前五排序也使用该 <code>T-3 基准涨跌幅</code>。
+  </div>
+
+  <h2>七、09:27 下单规则</h2>
+
+  <h3>下单时间</h3>
+  <div class="formula">09:27:00</div>
+
+  <h3>委托价格</h3>
+  <div class="formula">原始委托价 = 昨收价 × 1.005</div>
+  <div class="formula">委托价 = round_to_tick(昨收价 × 1.005)</div>
+  <p>
+    委托价固定为相对昨收上涨 0.5%，不是 <code>f × 1.005</code>，
+    也不是 09:27 的实时行情价。
+  </p>
+
+  <h3>资金分配</h3>
+  <p>下单前重新查询 QMT 账户总资产和可用资金。设实际下单股票数量为 N，默认最多为 5，可在 Qt 启动器修改。单只预算上限比例 R 默认 20%，可在 Qt 启动器选择 20% 至 100%。</p>
+  <div class="formula">单只上限 = 账户总资产 × R</div>
+  <div class="formula">平均可用资金 = 可用资金 / N</div>
+  <div class="formula">每只预算 = min(单只上限, 平均可用资金)</div>
+  <p>当 R 选择 100% 时，等价于不额外限制单只股票上限，只受平均可用资金约束。</p>
+
+  <h3>委托数量</h3>
+  <div class="formula">委托数量 = floor(每只预算 / 委托价 / 100) × 100</div>
+  <p>委托数量按 100 股整数手向下取整。不足 100 股时，该股票跳过下单。</p>
+
+  <h3>10:00 未完成订单撤单</h3>
+  <p>
+    程序会记录 09:27 成功提交的策略订单编号。到 <strong>10:00:00</strong> 时重新查询订单状态；
+    若订单成交数量小于委托数量，且订单状态仍允许撤单，则提交撤单。
+    已全部成交、已撤、废单或其他不可撤状态只记录日志，不重复处理。
+  </p>
+
+  <div class="notice">
+    资金计算没有额外预留手续费。账户资金接近全部分配时，券商端仍可能因为手续费、
+    冻结资金或其他规则拒绝订单。
+  </div>
+
+  <h2>八、输出文件与关键字段</h2>
+
+  <table>
+    <thead>
+      <tr><th>文件</th><th>内容</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><code>jingjia_filter_all_YYYYMMDD.csv</code></td>
+        <td>股票池全部股票、precheck、a～f 采样价格、quote_time、scan_time、筛选原因和排序字段。</td>
+      </tr>
+      <tr>
+        <td><code>jingjia_filter_selected_YYYYMMDD.csv</code></td>
+        <td>按 <code>rank_f_vs_base_pct</code> 从小到大取出的前 N 只股票，会参与下单。</td>
+      </tr>
+      <tr>
+        <td><code>jingjia_filter_selected_YYYYMMDD.sel</code></td>
+        <td>全部合格股票对应的同花顺板块文件。</td>
+      </tr>
+      <tr>
+        <td><code>jingjia_filter_YYYYMMDD.log</code></td>
+        <td>连接、采样、筛选、交易前 N 名、资金分配、委托、10:00 撤单和错误记录。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>CSV 结果文件是一行一只股票。每个成功采样点的精确 <code>quote_time</code> 会写入对应列，例如：</p>
+  <pre><code>precheck_quote_time_091600
+quote_time1_092003
+quote_time2_092100
+...
+quote_time6_092505</code></pre>
+
+  <p>最终排序和下单相关新增字段：</p>
+  <table>
+    <thead>
+      <tr><th>字段</th><th>含义</th></tr>
+    </thead>
+    <tbody>
+      <tr><td><code>order_rank</code></td><td>按 <code>rank_f_vs_base_pct</code> 从小到大排名前 N 的名次，取值 1～N；为空表示不下单。</td></tr>
+      <tr><td><code>rank_base_date</code></td><td>排序基准价 x 对应的交易日日期，即当前交易日前第 3 个交易日。</td></tr>
+      <tr><td><code>rank_base_close</code></td><td>排序基准价 x，即 <code>rank_base_date</code> 的收盘价。</td></tr>
+      <tr><td><code>rank_f_price</code></td><td>f 点价格。</td></tr>
+      <tr><td><code>rank_f_quote_time</code></td><td>f 价格对应的 quote_time。</td></tr>
+      <tr><td><code>rank_f_minus_base</code></td><td>辅助价差字段，即 <code>rank_f_price - rank_base_close</code>。</td></tr>
+      <tr><td><code>rank_f_vs_base_pct</code></td><td>f 相对 T-3 收盘价的涨跌幅，即 <code>(rank_f_price / rank_base_close - 1) × 100%</code>。</td></tr>
+      <tr><td><code>prior_t2_date</code></td><td>T-2 交易日日期。</td></tr>
+      <tr><td><code>prior_t2_max_drop_pct</code></td><td>T-2 最低价相对 T-3 收盘价的盘中最大跌幅。</td></tr>
+      <tr><td><code>prior_t1_date</code></td><td>T-1 交易日日期。</td></tr>
+      <tr><td><code>prior_t1_max_drop_pct</code></td><td>T-1 最低价相对 T-2 收盘价的盘中最大跌幅。</td></tr>
+    </tbody>
+  </table>
+
+  <h2>九、实时模式与历史模式</h2>
+
+  <table>
+    <thead>
+      <tr><th>模式</th><th>启动方式</th><th>是否下单</th><th>说明</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>实时模式</td>
+        <td><code>python .\jingjia_filter.py</code></td>
+        <td><strong>会真实下单</strong></td>
+        <td>使用实时 quote_time 窗口，09:27 提交买单。</td>
+      </tr>
+      <tr>
+        <td>历史模式</td>
+        <td><code>python .\jingjia_filter.py --date 20260709</code></td>
+        <td>不会下单</td>
+        <td>用于复盘筛选；历史模式同样会按目标日期的 T-3 交易日收盘价计算筛选条件和排序值。</td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>十、当前限制与风险</h2>
+  <ol>
+    <li>实时模式会真实提交买单，使用前必须确认当前账号和 MiniQMT 路径。</li>
+    <li>QMT 没有返回合格行情时，仍会出现缺失样本。</li>
+    <li>T-3 日线收盘价依赖 QMT 日线数据；缺少该基准价的股票不能通过最终筛选。</li>
+    <li>委托价固定为昨收上涨 0.5%，可能低于市场价格，因此不保证成交。</li>
+    <li>订单提交成功不等于成交成功。</li>
+    <li>当前只有 10:00 未完成订单撤单；没有补单、成交复核和重复下单保护。</li>
+    <li>同一账户不要重复启动多个策略实例。</li>
+  </ol>
+
+  <p class="small">
+    Markdown 版本：
+    <a href="jingjia_filter_current_logic.md">jingjia_filter_current_logic.md</a>
+  </p>
+</body>
+</html>
